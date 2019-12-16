@@ -2,6 +2,7 @@ package org.getopt.luke;
 
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.*;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
 
@@ -14,7 +15,7 @@ import java.util.*;
  * index, and these terms may have been changed (e.g. lowercased, stemmed),
  * and many other input tokens may have been skipped altogether by the
  * Analyzer, when fields were originally added to the index.
- * 
+ *
  * @author ab
  *
  */
@@ -24,7 +25,7 @@ public class DocReconstructor extends Observable {
   private AtomicReader reader = null;
   private int numTerms;
   private Bits live;
-  
+
   /**
    * Prepare a document reconstructor.
    * @param reader IndexReader to read from.
@@ -33,7 +34,7 @@ public class DocReconstructor extends Observable {
   public DocReconstructor(IndexReader reader) throws Exception {
     this(reader, null, -1);
   }
-  
+
   /**
    * Prepare a document reconstructor.
    * @param reader IndexReader to read from.
@@ -65,7 +66,7 @@ public class DocReconstructor extends Observable {
       numTerms = 0;
       Iterator<String> fe = fields.iterator();
       while (fe.hasNext()) {
-          String fld = fe.next();
+        String fld = fe.next();
         Terms t = fields.terms(fld);
         TermsEnum te = t.iterator(null);
         while (te.next() != null) {
@@ -76,7 +77,7 @@ public class DocReconstructor extends Observable {
     }
     live = MultiFields.getLiveDocs(reader);
   }
-  
+
   /**
    * Reconstruct document fields.
    * @param docNum document number. If this document is deleted, but the index
@@ -155,38 +156,45 @@ public class DocReconstructor extends Observable {
 
         DocsAndPositionsEnum newDpe = te.docsAndPositions(live, dpe, 0);
 
-        if (newDpe == null) { // no position info for this field
-            // re-construct without positions
-            GrowableStringArray gsa = (GrowableStringArray)
-                    res.getReconstructedFields().get(fld);
-            if (gsa == null) {
-                gsa = new GrowableStringArray();
-                res.getReconstructedFields().put(fld, gsa);
+        if (newDpe != null) {
+          // we have positions for the field, process them accordingly
+          dpe = newDpe;
+
+          int num = dpe.advance(docNum);
+          if (num != docNum) { // either greater than or NO_MORE_DOCS
+            continue; // no data for this term in this doc
+          }
+
+          // we have computed the value earlier, using the bytesRef data structure
+          docTerm = te.term().utf8ToString();
+
+          GrowableStringArray gsa = res.getReconstructedFields().get(fld);
+          if (gsa == null) {
+            gsa = new GrowableStringArray();
+            res.getReconstructedFields().put(fld, gsa);
+          }
+          for (int k = 0; k < dpe.freq(); k++) {
+            int pos = dpe.nextPosition();
+            gsa.append(pos, "|", docTerm);
+          }
+        } else {
+          // Reconstruct without positions (cross-reference via DocsEnum).
+          // NB if there are multiple terms they will all be added to the array at position 0
+          // (concatenated together, pipe-delimited)
+          DocsEnum docsEnum = te.docs(null, null);
+          if (docsEnum != null) {
+            int termDoc;
+            while ((termDoc = docsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+              if (termDoc == docNum) {
+                GrowableStringArray gsa = res.getReconstructedFields().get(fld);
+                if (gsa == null) {
+                  gsa = new GrowableStringArray();
+                  res.getReconstructedFields().put(fld, gsa);
+                }
+                gsa.append(0, "|", docTerm);
+              }
             }
-            gsa.append(0, "|", docTerm);
-            // we are done. Move to the next field
-            break;
-        }
-
-        // we should have positions as well for the field, process them accordingly
-        dpe = newDpe;
-
-        int num = dpe.advance(docNum);
-        if (num != docNum) { // either greater than or NO_MORE_DOCS
-          continue; // no data for this term in this doc
-        }
-
-        // we have computed the value earlier, using the bytesRef data structure
-        docTerm = te.term().utf8ToString();
-
-        GrowableStringArray gsa = res.getReconstructedFields().get(fld);
-        if (gsa == null) {
-          gsa = new GrowableStringArray();
-          res.getReconstructedFields().put(fld, gsa);
-        }
-        for (int k = 0; k < dpe.freq(); k++) {
-          int pos = dpe.nextPosition();
-          gsa.append(pos, "|", docTerm);
+          }
         }
       }
     }
@@ -196,7 +204,7 @@ public class DocReconstructor extends Observable {
     notifyObservers(progress);
     return res;
   }
-  
+
   /**
    * This class represents a reconstructed document.
    * @author ab
@@ -209,18 +217,18 @@ public class DocReconstructor extends Observable {
       storedFields = new HashMap<String, IndexableField[]>();
       reconstructedFields = new HashMap<String, GrowableStringArray>();
     }
-    
+
     /**
      * Construct an instance of this class using existing field data.
      * @param storedFields field data of stored fields
      * @param reconstructedFields field data of unstored fields
      */
     public Reconstructed(Map<String, IndexableField[]> storedFields,
-        Map<String, GrowableStringArray> reconstructedFields) {
+                         Map<String, GrowableStringArray> reconstructedFields) {
       this.storedFields = storedFields;
       this.reconstructedFields = reconstructedFields;
     }
-    
+
     /**
      * Get an alphabetically sorted list of field names.
      */
@@ -233,7 +241,7 @@ public class DocReconstructor extends Observable {
       Collections.sort(res);
       return res;
     }
-    
+
     public boolean hasField(String name) {
       return storedFields.containsKey(name) || reconstructedFields.containsKey(name);
     }
